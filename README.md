@@ -31,12 +31,19 @@ Maybe more powerful than oil.nvim
 
 (advice-add 'find-file :around #'find-file--handle-directory)
 ```
+# Dependencies
+
+https://github.com/emacsmirror/zoxide
+
+https://github.com/andreafrancia/trash-cli
+
 # Function
 
 | Command                 | Key     |
 |-------------------------|---------|
 | edit mode <-> tree mode | C-c C-t |
 | oe <-> dired            | C-c o   |
+| z                       | C-c C-j |
 
 ## edit mode
 
