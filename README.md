@@ -1,6 +1,15 @@
 # oe
 Maybe more powerful than oil.nvim
-
+```
+▼ oe
+  ├─ ▶ .git
+  ├─ 📄 .gitignore
+  ├─ 📄 LICENSE
+  ├─ 📝 README.md
+  ├─ 📜 oe-session.el
+  ├─ 📜 oe-trash.el
+  └─ 📜 oe.el
+```
 # Installation
 
 ```
