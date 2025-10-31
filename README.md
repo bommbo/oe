@@ -68,6 +68,7 @@ https://github.com/andreafrancia/trash-cli
 | oe-mark                  | m     |
 | oe-unmark                | u     |
 | oe-unmark-all            | U     |
+| oe-goto-mark             | C-c g |
 | oe-preview               | p     |
 
 ## more
