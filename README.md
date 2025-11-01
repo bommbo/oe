@@ -82,6 +82,15 @@ https://github.com/andreafrancia/trash-cli
 ---
 - `oe-delete-selected-with-trash`
 
+If you want to switch to *oe* buffer globally.
+```
+(defun oe-switch-to-buffer ()
+  "Switch to *oe* buffer if exists, else open Oe in current context."
+  (interactive)
+  (if (get-buffer "*oe*")
+	  (switch-to-buffer "*oe*")
+	(call-interactively #'oe-open)))
+```
 # Similar projects
 
 https://github.com/mwac-dev/grease.el
