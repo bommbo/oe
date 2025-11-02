@@ -37,6 +37,28 @@
   :type 'integer
   :group 'oe)
 
+(defcustom oe-follow-symlinks t
+  "Non-nil means follow symbolic links when entering directories.
+If nil, show link target information instead."
+  :type 'boolean
+  :group 'oe)
+
+(defcustom oe-copy-symlinks-as-symlinks t
+  "Non-nil means copy symbolic links as links, not as the files they point to."
+  :type 'boolean
+  :group 'oe)
+
+(defcustom oe-show-link-targets t
+  "Non-nil means display symbolic link targets in tree view."
+  :type 'boolean
+  :group 'oe)
+
+(defcustom oe-detect-hardlinks nil
+  "Non-nil means detect and display hard link information.
+This may be slower on large directories."
+  :type 'boolean
+  :group 'oe)
+
 ;;; ============================================================================
 ;;; Variables and Faces
 ;;; ============================================================================
@@ -90,6 +112,18 @@ Value: plist with :folded-dirs :selected-files :tree-mode :cursor-path :cursor-l
   '((t :inherit default))
   "Face for file names.")
 
+(defface oe-symlink-face
+  '((t :inherit font-lock-keyword-face))
+  "Face for symbolic links.")
+
+(defface oe-broken-symlink-face
+  '((t :inherit error))
+  "Face for broken symbolic links.")
+
+(defface oe-hardlink-face
+  '((t :inherit font-lock-type-face))
+  "Face for files with multiple hard links.")
+
 (defface oe-tree-indent-face
   '((t :inherit font-lock-comment-face))
   "Face for tree indentation lines.")
@@ -101,6 +135,10 @@ Value: plist with :folded-dirs :selected-files :tree-mode :cursor-path :cursor-l
 (defface oe-selected-face
   '((t :inherit region))
   "Face for selected files.")
+
+(defface oe-link-target-face
+  '((t :inherit font-lock-comment-face :slant italic))
+  "Face for symbolic link targets.")
 
 ;;; ============================================================================
 ;;; Keymap
@@ -142,6 +180,8 @@ Value: plist with :folded-dirs :selected-files :tree-mode :cursor-path :cursor-l
 	(define-key map (kbd "C-c g") #'oe-goto-mark)
 	;; Preview
 	(define-key map (kbd "p") #'oe-preview)
+	;; Link operations
+	(define-key map (kbd "L") #'oe-show-link-info)
 	map)
   "Keymap for tree mode operations.")
 
@@ -151,6 +191,93 @@ Value: plist with :folded-dirs :selected-files :tree-mode :cursor-path :cursor-l
 	(define-key map (kbd "C-c C-c") #'oe-save)
 	map)
   "Keymap for edit mode operations.")
+
+;;; ============================================================================
+;;; Link Handling Functions
+;;; ============================================================================
+
+(defun oe--file-type (path)
+  "Return file type: 'symlink, 'broken-symlink, 'directory, 'file, or nil.
+For symlinks, checks if the target exists."
+  (cond
+   ((not (file-exists-p path))
+	(if (file-symlink-p path) 'broken-symlink nil))
+   ((file-symlink-p path) 'symlink)
+   ((file-directory-p path) 'directory)
+   (t 'file)))
+
+(defun oe--get-link-target (path)
+  "Return the target of symbolic link at PATH, or nil if not a link."
+  (when (file-symlink-p path)
+	(file-symlink-p path)))
+
+(defun oe--is-broken-symlink-p (path)
+  "Return t if PATH is a broken symbolic link."
+  (and (file-symlink-p path)
+	   (not (file-exists-p path))))
+
+(defun oe--get-hardlink-count (path)
+  "Return the number of hard links to PATH, or nil if unavailable."
+  (when (and oe-detect-hardlinks
+			 (file-exists-p path)
+			 (not (file-directory-p path)))
+	(condition-case nil
+		(let ((attrs (file-attributes path)))
+		  (nth 1 attrs))  ; nlinks is at position 1
+	  (error nil))))
+
+(defun oe--is-hardlinked-p (path)
+  "Return t if PATH has multiple hard links."
+  (let ((count (oe--get-hardlink-count path)))
+	(and count (> count 1))))
+
+(defun oe--copy-preserve-links (src dest)
+  "Copy SRC to DEST, optionally preserving symbolic links.
+Behavior depends on `oe-copy-symlinks-as-symlinks'."
+  (let ((type (oe--file-type src)))
+	(cond
+	 ;; Broken symlink - still try to copy it
+	 ((eq type 'broken-symlink)
+	  (if oe-copy-symlinks-as-symlinks
+		  (let ((target (oe--get-link-target src)))
+			(make-symbolic-link target dest t))
+		(error "Cannot copy broken symbolic link as regular file: %s" src)))
+
+	 ;; Working symlink
+	 ((eq type 'symlink)
+	  (if oe-copy-symlinks-as-symlinks
+		  (let ((target (oe--get-link-target src)))
+			(make-symbolic-link target dest t))
+		;; Copy the target content
+		(if (file-directory-p src)
+			(copy-directory src dest nil t t)
+		  (copy-file src dest t))))
+
+	 ;; Directory
+	 ((eq type 'directory)
+	  (copy-directory src dest nil t t))
+
+	 ;; Regular file (including hard links - creates new file)
+	 (t
+	  (copy-file src dest t)))))
+
+(defun oe--format-link-info (path)
+  "Return formatted string with link information for PATH."
+  (let ((type (oe--file-type path)))
+	(cond
+	 ((eq type 'broken-symlink)
+	  (format " → %s [BROKEN]" (oe--get-link-target path)))
+
+	 ((eq type 'symlink)
+	  (let ((target (oe--get-link-target path)))
+		(if (file-directory-p path)
+			(format " → %s/" target)
+		  (format " → %s" target))))
+
+	 ((oe--is-hardlinked-p path)
+	  (format " [%d links]" (oe--get-hardlink-count path)))
+
+	 (t ""))))
 
 ;;; ============================================================================
 ;;; State Management
@@ -303,21 +430,39 @@ Value: plist with :folded-dirs :selected-files :tree-mode :cursor-path :cursor-l
 
 (defun oe--icon (path is-dir folded)
   "Return icon for PATH. IS-DIR indicates directory. FOLDED for collapsed state."
-  (cond
-   ((and is-dir folded) "▶")
-   (is-dir "▼")
-   ((string-match-p "\\.el$" path) "📜")
-   ((string-match-p "\\.org$" path) "📋")
-   ((string-match-p "\\.md$" path) "📝")
-   ((string-match-p "\\.txt$" path) "📄")
-   ((string-match-p "\\.[ch]\\(pp\\)?$" path) "🔧")
-   ((string-match-p "\\.\\(py\\|rb\\|js\\|ts\\)$" path) "🐍")
-   ((string-match-p "\\.\\(jpg\\|png\\|gif\\|svg\\)$" path) "🖼️")
-   ((string-match-p "\\.\\(mp3\\|wav\\|flac\\)$" path) "🎵")
-   ((string-match-p "\\.\\(mp4\\|avi\\|mkv\\)$" path) "🎬")
-   ((string-match-p "\\.\\(zip\\|tar\\|gz\\|7z\\)$" path) "📦")
-   ((string-match-p "\\.pdf$" path) "📕")
-   (t "📄")))
+  (let ((type (oe--file-type path)))
+	(cond
+	 ;; Broken symlink
+	 ((eq type 'broken-symlink)
+	  "🔗❌")
+
+	 ;; Symlink to directory
+	 ((and (eq type 'symlink) is-dir folded)
+	  "🔗▶")
+	 ((and (eq type 'symlink) is-dir)
+	  "🔗▼")
+
+	 ;; Symlink to file
+	 ((eq type 'symlink)
+	  "🔗📄")
+
+	 ;; Regular directory
+	 ((and is-dir folded) "▶")
+	 (is-dir "▼")
+
+	 ;; File type detection
+	 ((string-match-p "\\.el$" path) "📜")
+	 ((string-match-p "\\.org$" path) "📋")
+	 ((string-match-p "\\.md$" path) "📝")
+	 ((string-match-p "\\.txt$" path) "📄")
+	 ((string-match-p "\\.[ch]\\(pp\\)?$" path) "🔧")
+	 ((string-match-p "\\.\\(py\\|rb\\|js\\|ts\\)$" path) "🐍")
+	 ((string-match-p "\\.\\(jpg\\|png\\|gif\\|svg\\)$" path) "🖼️")
+	 ((string-match-p "\\.\\(mp3\\|wav\\|flac\\)$" path) "🎵")
+	 ((string-match-p "\\.\\(mp4\\|avi\\|mkv\\)$" path) "🎬")
+	 ((string-match-p "\\.\\(zip\\|tar\\|gz\\|7z\\)$" path) "📦")
+	 ((string-match-p "\\.pdf$" path) "📕")
+	 (t "📄"))))
 
 ;;; ============================================================================
 ;;; Tree View
@@ -325,17 +470,24 @@ Value: plist with :folded-dirs :selected-files :tree-mode :cursor-path :cursor-l
 
 (defun oe--tree-insert-entry (path depth is-last parent-path)
   "Insert tree entry for PATH at DEPTH. IS-LAST indicates last child."
-  (when (and path (file-exists-p path))
+  (when (and path (or (file-exists-p path) (file-symlink-p path)))
 	(let* ((name (file-name-nondirectory path))
-		   (is-dir (file-directory-p path))
+		   (type (oe--file-type path))
+		   (is-dir (or (eq type 'directory)
+					   (and (eq type 'symlink) (file-directory-p path))))
 		   (fold-state (gethash path oe--folded-dirs))
 		   (folded (not (eq fold-state t)))
-		   (icon (oe--icon name is-dir folded))
+		   (icon (oe--icon path is-dir folded))
 		   (marked (oe--is-marked-p path))
 		   (selected (oe--is-selected-p path))
+		   (link-info (when oe-show-link-targets
+						(oe--format-link-info path)))
 		   (face (cond
 				  (marked 'oe-marked-face)
 				  (selected 'oe-selected-face)
+				  ((eq type 'broken-symlink) 'oe-broken-symlink-face)
+				  ((eq type 'symlink) 'oe-symlink-face)
+				  ((oe--is-hardlinked-p path) 'oe-hardlink-face)
 				  (is-dir 'oe-directory-face)
 				  (t 'oe-file-face)))
 		   (mark-indicator (if marked "★ " ""))
@@ -345,15 +497,28 @@ Value: plist with :folded-dirs :selected-files :tree-mode :cursor-path :cursor-l
 							   (propertize (if is-last "└─ " "├─ ")
 										 'face 'oe-tree-indent-face))
 					 ""))
-		   (line-content (format "%s%s%s%s %s\n" prefix select-indicator mark-indicator icon name))
+		   (line-content (format "%s%s%s%s %s%s\n"
+								 prefix
+								 select-indicator
+								 mark-indicator
+								 icon
+								 name
+								 (propertize (or link-info "")
+										   'face 'oe-link-target-face)))
 		   (start (point)))
 	  (insert line-content)
 	  (put-text-property start (point) 'oe-path path)
 	  (put-text-property start (point) 'oe-depth depth)
 	  (put-text-property start (point) 'oe-is-dir is-dir)
 	  (put-text-property start (point) 'oe-parent parent-path)
+	  (put-text-property start (point) 'oe-link-type type)
 	  (put-text-property start (point) 'face face)
-	  (when (and is-dir (eq fold-state t))
+
+	  ;; Expand directory if not folded (and not a symlink unless following)
+	  (when (and is-dir
+				 (eq fold-state t)
+				 (or (not (eq type 'symlink)) oe-follow-symlinks)
+				 (file-readable-p path))
 		(let* ((entries (condition-case nil
 							(directory-files path t directory-files-no-dot-files-regexp)
 						  (error nil)))
@@ -388,7 +553,7 @@ Value: plist with :folded-dirs :selected-files :tree-mode :cursor-path :cursor-l
 				 for idx from 0
 				 do (oe--tree-insert-entry entry 0 (= idx (1- count)) dir)))
 	  (goto-char (point-max))
-	  (insert (propertize "\n# RET=open ^=up SPC=select t=toggle C=copy X=cut P=paste\n"
+	  (insert (propertize "\n# RET=open ^=up SPC=select L=link-info C=copy X=cut P=paste\n"
 						  'face 'font-lock-comment-face))
 	  (goto-char (min old-point (point-max)))
 	  (when (< (point) (point-min))
@@ -412,15 +577,23 @@ Value: plist with :folded-dirs :selected-files :tree-mode :cursor-path :cursor-l
 			(formatted-entries nil))
 		(dolist (entry entries)
 		  (let* ((path (expand-file-name entry dir))
-				 (is-dir (file-directory-p path))
+				 (type (oe--file-type path))
+				 (is-dir (or (eq type 'directory)
+							 (and (eq type 'symlink) (file-directory-p path))))
 				 (display-name (if is-dir (concat entry "/") entry))
-				 (icon (oe--icon entry is-dir nil))
+				 (icon (oe--icon path is-dir nil))
 				 (marked (oe--is-marked-p path))
-				 (face (if marked 'oe-marked-face
-						 (if is-dir 'oe-directory-face 'oe-file-face)))
+				 (face (cond
+						(marked 'oe-marked-face)
+						((eq type 'broken-symlink) 'oe-broken-symlink-face)
+						((eq type 'symlink) 'oe-symlink-face)
+						((oe--is-hardlinked-p path) 'oe-hardlink-face)
+						(is-dir 'oe-directory-face)
+						(t 'oe-file-face)))
 				 (mark-indicator (if marked "★ " "")))
 			(push display-name formatted-entries)
-			(insert (propertize (format "%s%s %s\n" mark-indicator icon display-name) 'face face))))
+			(insert (propertize (format "%s%s %s\n" mark-indicator icon display-name)
+							   'face face))))
 		(setq oe--orig-entries (nreverse formatted-entries)))
 	  (goto-char (point-max))
 	  (insert (propertize "\n# Edit file names above, then C-c C-c to save changes\n"
@@ -547,7 +720,8 @@ If KEEP-MODE is non-nil, preserve current tree/edit mode."
 	  (list :path path
 			:depth (get-text-property (point) 'oe-depth)
 			:is-dir (get-text-property (point) 'oe-is-dir)
-			:parent (get-text-property (point) 'oe-parent)))))
+			:parent (get-text-property (point) 'oe-parent)
+			:link-type (get-text-property (point) 'oe-link-type)))))
 
 (defun oe--lines ()
   "Return all non-empty, non-comment lines, stripped of decorations but preserving trailing /."
@@ -663,7 +837,7 @@ If KEEP-MODE is non-nil, preserve current tree/edit mode."
 		(inhibit-read-only t)
 		(current-line (line-number-at-pos)))
 	(dolist (src oe--clipboard)
-	  (when (file-exists-p src)
+	  (when (or (file-exists-p src) (file-symlink-p src))
 		(let* ((name (file-name-nondirectory src))
 			   (dest (expand-file-name name target-dir)))
 		  ;; Show progress for each file
@@ -672,9 +846,8 @@ If KEEP-MODE is non-nil, preserve current tree/edit mode."
 			  (progn
 				(if (eq oe--clipboard-mode 'cut)
 					(rename-file src dest)
-				  (if (file-directory-p src)
-					  (copy-directory src dest nil t t)
-					(copy-file src dest)))
+				  ;; Use link-preserving copy
+				  (oe--copy-preserve-links src dest))
 				(setq count (1+ count)))
 			(error
 			 (push (format "%s: %s" name (error-message-string err)) errors))))))
@@ -734,11 +907,27 @@ If KEEP-MODE is non-nil, preserve current tree/edit mode."
   (let* ((info (oe--get-line-info))
 		 (path (plist-get info :path))
 		 (is-dir (plist-get info :is-dir))
+		 (link-type (plist-get info :link-type))
 		 (inhibit-read-only t))
 	(when path
-	  (if is-dir
-		  (oe-open path t)  ; Keep current mode
-		(find-file path)))))
+	  (cond
+	   ;; Broken symlink
+	   ((eq link-type 'broken-symlink)
+		(message "Broken symbolic link: %s → %s"
+				 path (oe--get-link-target path)))
+
+	   ;; Directory symlink - check follow setting
+	   ((and (eq link-type 'symlink) is-dir (not oe-follow-symlinks))
+		(message "Symbolic link to directory: %s → %s (Set oe-follow-symlinks to follow)"
+				 path (oe--get-link-target path)))
+
+	   ;; Directory (including followed symlinks)
+	   (is-dir
+		(oe-open path t))
+
+	   ;; File (including symlinks to files)
+	   (t
+		(find-file path))))))
 
 (defun oe-up ()
   "Go up to parent directory."
@@ -747,7 +936,7 @@ If KEEP-MODE is non-nil, preserve current tree/edit mode."
 		(inhibit-read-only t))
 	(if (not parent)
 		(message "Already at root directory")
-	  (oe-open parent t))))  ; Keep current mode
+	  (oe-open parent t))))
 
 (defun oe--zoxide-query ()
   "Query zoxide for directory list."
@@ -768,7 +957,7 @@ If KEEP-MODE is non-nil, preserve current tree/edit mode."
 	(when (and selected-dir (not (string-empty-p selected-dir)))
 	  (if (file-directory-p selected-dir)
 		  (progn
-			(oe-open selected-dir t)  ; Keep current mode
+			(oe-open selected-dir t)
 			(message "Jumped to: %s" selected-dir))
 		(message "Not a directory: %s" selected-dir)))))
 
@@ -830,7 +1019,7 @@ If KEEP-MODE is non-nil, preserve current tree/edit mode."
 		  (message "Forward: %s [%d/%d]" dir (1+ oe--history-index) (length oe--history)))))))
 
 ;;; ============================================================================
-;;; History Navigation
+;;; Tree Fold Commands
 ;;; ============================================================================
 
 (defun oe-toggle-fold ()
@@ -876,6 +1065,45 @@ If KEEP-MODE is non-nil, preserve current tree/edit mode."
 	(forward-line (1- line))
 	(move-to-column col))
   (message "%s mode" (if oe--tree-mode "Tree" "Edit")))
+
+;;; ============================================================================
+;;; Link Information Commands
+;;; ============================================================================
+
+(defun oe-show-link-info ()
+  "Show detailed information about the link at point."
+  (interactive)
+  (let* ((path (oe--get-path-at-point))
+		 (type (when path (oe--file-type path))))
+	(if (not path)
+		(message "No file at point")
+	  (cond
+	   ((eq type 'broken-symlink)
+		(let ((target (oe--get-link-target path)))
+		  (message "Broken symbolic link:\n  Source: %s\n  Target: %s (does not exist)"
+				   path target)))
+
+	   ((eq type 'symlink)
+		(let* ((target (oe--get-link-target path))
+			   (target-type (oe--file-type target))
+			   (absolute-target (expand-file-name target (file-name-directory path))))
+		  (message "Symbolic link:\n  Source: %s\n  Target: %s\n  Absolute: %s\n  Type: %s"
+				   path target absolute-target
+				   (cond
+					((eq target-type 'directory) "directory")
+					((eq target-type 'file) "file")
+					((eq target-type 'symlink) "symbolic link")
+					(t "unknown")))))
+
+	   ((oe--is-hardlinked-p path)
+		(let ((count (oe--get-hardlink-count path)))
+		  (message "Hard link:\n  Path: %s\n  Link count: %d\n  (File has %d hard links)"
+				   path count count)))
+
+	   (t
+		(message "Regular %s: %s"
+				 (if (file-directory-p path) "directory" "file")
+				 path))))))
 
 ;;; ============================================================================
 ;;; Mark Commands (Persistent Bookmarks)
@@ -975,7 +1203,7 @@ If KEEP-MODE is non-nil, preserve current tree/edit mode."
 			   (path (cdr mark-entry)))
 		  (when path
 			(if (file-directory-p path)
-				(oe-open path t)  ; Keep current mode
+				(oe-open path t)
 			  (let ((dir (file-name-directory path)))
 				(oe-open dir t)
 				(goto-char (point-min))
@@ -1007,21 +1235,19 @@ If KEEP-MODE is non-nil, preserve current tree/edit mode."
 	  (dolist (name current)
 		(puthash name t curr-set))
 
-	  ;; Step 1: Find pure additions (in current, not in original)
+	  ;; Step 1: Find pure additions
 	  (dolist (name current)
 		(unless (gethash name orig-set)
 		  (push name added)))
 
-	  ;; Step 2: Find pure deletions (in original, not in current)
+	  ;; Step 2: Find pure deletions
 	  (dolist (name original)
 		(unless (gethash name curr-set)
 		  (push name deleted)))
 
-	  ;; Step 3: Detect renames by position (only if counts match after add/del)
-	  ;; If we have equal number of additions and deletions, try to match them as renames
+	  ;; Step 3: Detect renames by position
 	  (when (and (= (length added) (length deleted))
 				 (> (length added) 0))
-		;; Try to match by position in the difference
 		(let ((orig-list original)
 			  (curr-list current)
 			  (temp-renames nil))
@@ -1031,7 +1257,6 @@ If KEEP-MODE is non-nil, preserve current tree/edit mode."
 			  (when (and (member orig-name deleted)
 						 (member curr-name added)
 						 (not (string= orig-name curr-name)))
-				;; This looks like a rename
 				(push (cons orig-name curr-name) temp-renames)
 				(setq deleted (delete orig-name deleted))
 				(setq added (delete curr-name added))))
@@ -1068,7 +1293,7 @@ If KEEP-MODE is non-nil, preserve current tree/edit mode."
 					(message "Renamed: %s → %s" old-name new-name))
 				(error (message "Error renaming %s: %s" old-name (error-message-string err))))))
 
-		  ;; Then create new files
+		  ;; Create new files
 		  (dolist (f added)
 			(let* ((is-dir (string-suffix-p "/" f))
 				   (clean-name (if is-dir (substring f 0 -1) f))
@@ -1082,7 +1307,7 @@ If KEEP-MODE is non-nil, preserve current tree/edit mode."
 					(message "Created file: %s" path))
 				(error (message "Error creating %s: %s" f (error-message-string err))))))
 
-		  ;; Finally delete files
+		  ;; Delete files
 		  (dolist (f deleted)
 			(let* ((is-dir (string-suffix-p "/" f))
 				   (clean-name (if is-dir (substring f 0 -1) f))
@@ -1115,7 +1340,7 @@ If KEEP-MODE is non-nil, preserve current tree/edit mode."
 	  (switch-to-buffer oe--orig-buf))))
 
 ;;; ============================================================================
-;;; preview
+;;; Preview
 ;;; ============================================================================
 
 (defun oe-preview ()
@@ -1123,26 +1348,43 @@ If KEEP-MODE is non-nil, preserve current tree/edit mode."
   (interactive)
   (let ((path (oe--get-path-at-point)))
 	(when path
-	  (if (file-directory-p path)
-		  (message "Directory: %d items"
-				   (length (directory-files path nil nil t))) ; t to skip . and ..
+	  (cond
+	   ;; Directory
+	   ((file-directory-p path)
+		(message "Directory: %d items"
+				 (length (directory-files path nil nil t))))
+
+	   ;; Broken symlink
+	   ((oe--is-broken-symlink-p path)
+		(message "Cannot preview broken symbolic link: %s → %s"
+				 path (oe--get-link-target path)))
+
+	   ;; Regular file or working symlink
+	   (t
 		(let ((preview-buffer (get-buffer-create "*Oe Preview*")))
 		  (with-current-buffer preview-buffer
 			(let ((inhibit-read-only t))
 			  (erase-buffer)
 			  (condition-case err
-				  (insert-file-contents path nil 0 10000)
+				  (insert-file-contents path nil 0 oe-preview-size)
 				(file-too-short
 				 (insert-file-contents path nil))
 				(file-error
-				 (insert (format "Error reading file: %s" (error-message-string err))))))
+				 (insert (format "Error reading file: %s" (error-message-string err)))))
+			  ;; Show link info at top if it's a symlink
+			  (when (file-symlink-p path)
+				(goto-char (point-min))
+				(insert (propertize (format "[Symlink: %s → %s]\n\n"
+											(file-name-nondirectory path)
+											(oe--get-link-target path))
+									'face 'oe-link-target-face))))
 			(goto-char (point-min))
 			(special-mode))
 		  ;; Display in bottom window and switch to it
 		  (let ((preview-window (display-buffer preview-buffer
 												'((display-buffer-at-bottom)
 												  (window-height . 10)))))
-			(select-window preview-window)))))))
+			(select-window preview-window))))))))
 
 ;;; ============================================================================
 ;;; Mode Definition
@@ -1156,7 +1398,7 @@ If KEEP-MODE is non-nil, preserve current tree/edit mode."
 						(list oe-tree-mode-map oe-mode-map)))
 		(setq buffer-read-only t)
 		(setq-local header-line-format
-					"Tree: RET=open ^=up SPC=select C=copy X=cut P=paste q=quit"))
+					"Tree: RET=open ^=up SPC=select L=link-info C=copy X=cut P=paste q=quit"))
 	(use-local-map (make-composed-keymap
 					(list oe-edit-mode-map oe-mode-map)))
 	(setq buffer-read-only nil)
@@ -1164,7 +1406,7 @@ If KEEP-MODE is non-nil, preserve current tree/edit mode."
 				"Edit: C-c C-c=save C-c C-t=tree q=quit")))
 
 (define-minor-mode oe-mode
-  "Minimal editable directory buffer, inspired by oe.nvim."
+  "Minimal editable directory buffer, inspired by oil.nvim."
   :lighter " Oe"
   :keymap oe-mode-map
   (oe--update-keymap))
@@ -1172,14 +1414,6 @@ If KEEP-MODE is non-nil, preserve current tree/edit mode."
 ;;; ============================================================================
 ;;; Integration
 ;;; ============================================================================
-
-;;;###autoload
-(defun oe-dired-here ()
-  "Open current dired directory in Oe."
-  (interactive)
-  (if (eq major-mode 'dired-mode)
-	  (oe-open default-directory)
-	(user-error "Not in dired buffer")))
 
 ;;;###autoload
 (defun oe-to-dired ()
