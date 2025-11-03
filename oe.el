@@ -497,22 +497,39 @@ Behavior depends on `oe-copy-symlinks-as-symlinks'."
 							   (propertize (if is-last "└─ " "├─ ")
 										 'face 'oe-tree-indent-face))
 					 ""))
-		   (line-content (format "%s%s%s%s %s%s\n"
-								 prefix
-								 select-indicator
-								 mark-indicator
-								 icon
-								 name
-								 (propertize (or link-info "")
-										   'face 'oe-link-target-face)))
-		   (start (point)))
-	  (insert line-content)
+		   (start (point))
+		   ;; Get icon face to preserve it
+		   (icon-face (get-text-property 0 'face icon))
+		   (icon-start nil)
+		   (icon-end nil))
+
+	  ;; Insert prefix and indicators
+	  (insert prefix select-indicator mark-indicator)
+
+	  ;; Insert icon and record its position
+	  (setq icon-start (point))
+	  (insert icon " ")
+	  (setq icon-end (1- (point)))  ; Before the space
+
+	  ;; Insert name and link info
+	  (insert name)
+	  (when link-info
+		(insert (propertize link-info 'face 'oe-link-target-face)))
+	  (insert "\n")
+
+	  ;; Apply metadata properties to the whole line
 	  (put-text-property start (point) 'oe-path path)
 	  (put-text-property start (point) 'oe-depth depth)
 	  (put-text-property start (point) 'oe-is-dir is-dir)
 	  (put-text-property start (point) 'oe-parent parent-path)
 	  (put-text-property start (point) 'oe-link-type type)
-	  (put-text-property start (point) 'face face)
+
+	  ;; Apply face to name part only (skip icon and prefix)
+	  (put-text-property (1+ icon-end) (point) 'face face)
+
+	  ;; Preserve icon face by re-applying it
+	  (when icon-face
+		(put-text-property icon-start icon-end 'face icon-face))
 
 	  ;; Expand directory if not folded (and not a symlink unless following)
 	  (when (and is-dir
@@ -590,10 +607,33 @@ Behavior depends on `oe-copy-symlinks-as-symlinks'."
 						((oe--is-hardlinked-p path) 'oe-hardlink-face)
 						(is-dir 'oe-directory-face)
 						(t 'oe-file-face)))
-				 (mark-indicator (if marked "★ " "")))
+				 (mark-indicator (if marked "★ " ""))
+				 (line-start (point))
+				 ;; Get icon face to preserve it
+				 (icon-face (get-text-property 0 'face icon))
+				 (icon-start nil)
+				 (icon-end nil))
+
 			(push display-name formatted-entries)
-			(insert (propertize (format "%s%s %s\n" mark-indicator icon display-name)
-							   'face face))))
+
+			;; Insert mark indicator
+			(insert mark-indicator)
+
+			;; Insert icon and record its position
+			(setq icon-start (point))
+			(insert icon " ")
+			(setq icon-end (1- (point)))  ; Before the space
+
+			;; Insert display name
+			(insert display-name "\n")
+
+			;; Apply face to name part only (skip icon and mark indicator)
+			(put-text-property (1+ icon-end) (point) 'face face)
+
+			;; Preserve icon face by re-applying it
+			(when icon-face
+			  (put-text-property icon-start icon-end 'face icon-face))))
+
 		(setq oe--orig-entries (nreverse formatted-entries)))
 	  (goto-char (point-max))
 	  (insert (propertize "\n# Edit file names above, then C-c C-c to save changes\n"
